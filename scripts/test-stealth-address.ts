@@ -24,14 +24,37 @@ function computeSharedSecret(privateKey: Hex, publicKey: Hex): Hex {
   return bytesToHex(sharedSecret);
 }
 
+// --- ERC-6538 Simulation (The Registry) ---
+const MockRegistry: Record<string, { spendingPubKey: Hex, viewingPubKey: Hex }> = {};
+
+async function registerKeys(identifier: string, spendingPubKey: Hex, viewingPubKey: Hex) {
+  console.log(`\n[ERC-6538 Registry] Registering keys for '${identifier}'...`);
+  MockRegistry[identifier] = { spendingPubKey, viewingPubKey };
+  await sleep(500);
+  console.log(`[ERC-6538 Registry] Keys registered successfully!`);
+}
+
+async function lookupKeys(identifier: string) {
+  console.log(`\n[ERC-6538 Registry] Looking up keys for '${identifier}'...`);
+  await sleep(800);
+  const keys = MockRegistry[identifier];
+  if (!keys) throw new Error("Recipient not found in registry!");
+  console.log(`[ERC-6538 Registry] Found Stealth Meta-Address for '${identifier}'`);
+  return keys;
+}
+
 // --- Main Logic ---
 
-async function generateStealthAddress(recipientMetaAddress: { spendingPubKey: Hex, viewingPubKey: Hex }) {
+async function generateStealthAddress(recipientIdentifier: string) {
   console.log("\n==================================================================================");
   console.log("                           SENDER SIDE (Generating Address)                        ");
   console.log("==================================================================================");
   await sleep(800);
-  console.log("1. Sender needs Recipient's Meta-Address:");
+
+  // 1. Lookup Recipient Keys (ERC-6538)
+  console.log(`1. Sender needs Recipient's Meta-Address (for '${recipientIdentifier}'):`);
+  const recipientMetaAddress = await lookupKeys(recipientIdentifier);
+  
   // Construct the full meta-address string
   const metaAddressString = `st:eth:${recipientMetaAddress.spendingPubKey}:${recipientMetaAddress.viewingPubKey}`;
   console.log(`   [String] Full Meta-Address: ${metaAddressString}`);
@@ -39,7 +62,7 @@ async function generateStealthAddress(recipientMetaAddress: { spendingPubKey: He
   console.log(`   [Public] Viewing Key:       ${recipientMetaAddress.viewingPubKey}`);
   await sleep(1500);
 
-  // 1. Generate Ephemeral Key Pair
+  // 2. Generate Ephemeral Key Pair
   const ephemeralPrivKey = generatePrivateKey();
   const ephemeralPubKey = getPublicKey(ephemeralPrivKey);
   console.log("\n2. Sender generates a temporary 'Ephemeral Key Pair':");
@@ -47,7 +70,7 @@ async function generateStealthAddress(recipientMetaAddress: { spendingPubKey: He
   console.log(`   [Public]  Ephemeral Key: ${ephemeralPubKey} (Broadcasted to network)`);
   await sleep(1500);
 
-  // 2. Compute Shared Secret
+  // 3. Compute Shared Secret
   // S = ephemeralPrivKey * recipientViewingPubKey
   const sharedSecret = computeSharedSecret(ephemeralPrivKey, recipientMetaAddress.viewingPubKey);
   console.log("\n3. Sender computes 'Shared Secret' (ECDH):");
@@ -55,7 +78,7 @@ async function generateStealthAddress(recipientMetaAddress: { spendingPubKey: He
   console.log(`   Result (S): ${sharedSecret}`);
   await sleep(1500);
 
-  // 3. Compute View Tag
+  // 4. Compute View Tag
   const hashedSharedSecret = keccak256(hexToBytes(sharedSecret));
   const viewTag = hexToBytes(hashedSharedSecret)[0];
   console.log("\n4. Sender computes 'View Tag' (for filtering):");
@@ -64,16 +87,15 @@ async function generateStealthAddress(recipientMetaAddress: { spendingPubKey: He
   console.log(`   View Tag: ${viewTag} (Broadcasted)`);
   await sleep(1500);
 
-  // 4. Derive Stealth Public Key
+  // 5. Derive Stealth Public Key
   // P_stealth = P_spending + s * G
   const s_scalar = hexToBytes(hashedSharedSecret);
   
-  // Fix: Ensure we pass hex strings (without 0x) to Point.fromHex
   const p_spending_hex = recipientMetaAddress.spendingPubKey.slice(2);
   const p_spending_point = secp256k1.Point.fromHex(p_spending_hex);
   
   const s_G_pubKey = secp256k1.getPublicKey(s_scalar, true);
-  const s_G_hex = bytesToHex(s_G_pubKey).slice(2); // Convert Uint8Array to Hex String and remove 0x
+  const s_G_hex = bytesToHex(s_G_pubKey).slice(2);
   const s_G_point = secp256k1.Point.fromHex(s_G_hex);
   
   const p_stealth_point = p_spending_point.add(s_G_point);
@@ -84,7 +106,7 @@ async function generateStealthAddress(recipientMetaAddress: { spendingPubKey: He
   console.log(`   Stealth PubKey: 0x${stealthPubKey}`);
   await sleep(1500);
 
-  // 5. Convert to Ethereum Address
+  // 6. Convert to Ethereum Address
   const uncompressedPubKey = p_stealth_point.toHex(false);
   const pubKeyBytes = hexToBytes(`0x${uncompressedPubKey}` as Hex).slice(1);
   const addressHash = keccak256(pubKeyBytes);
@@ -188,10 +210,25 @@ async function main() {
   console.log(`   [Private] Viewing Key:      ${viewingPrivKey}  (KEPT SECRET)`);
   console.log(`   [Public]  Spending Key:     ${spendingPubKey} (SHARED)`);
   console.log(`   [Public]  Viewing Key:      ${viewingPubKey}  (SHARED)`);
+  
+  // --- SCENARIO A: ENS Handle ---
+  console.log("\n--- SCENARIO A: Using ENS Handle (alice.eth) ---");
+  const ensHandle = "alice.eth";
+  await registerKeys(ensHandle, spendingPubKey, viewingPubKey);
+  await sleep(1000);
+  
+  // --- SCENARIO B: Raw Address ---
+  console.log("\n--- SCENARIO B: Using Raw Address (0x123...) ---");
+  const rawAddress = "0x1234567890123456789012345678901234567890"; // Mock Address
+  await registerKeys(rawAddress, spendingPubKey, viewingPubKey);
+  await sleep(1000);
+
+  console.log("\n[NOTE] ERC-6538 Registry supports BOTH! You don't need ENS.");
   await sleep(2000);
 
-  // 2. Sender Generates Stealth Address
-  const announcementData = await generateStealthAddress({ spendingPubKey, viewingPubKey });
+  // 2. Sender Generates Stealth Address (using raw address to prove point)
+  console.log("\n>>> Sender chooses to send to the RAW ADDRESS (No ENS required) <<<");
+  const announcementData = await generateStealthAddress(rawAddress);
 
   // 3. Recipient Scans and Recovers
   await scanAndRecover(

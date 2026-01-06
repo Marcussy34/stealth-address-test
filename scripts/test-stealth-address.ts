@@ -8,6 +8,8 @@ const CURVE_ORDER = BigInt("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBF
 
 // --- Helper Functions ---
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 function generatePrivateKey(): Hex {
   return bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
 }
@@ -24,13 +26,18 @@ function computeSharedSecret(privateKey: Hex, publicKey: Hex): Hex {
 
 // --- Main Logic ---
 
-function generateStealthAddress(recipientMetaAddress: { spendingPubKey: Hex, viewingPubKey: Hex }) {
+async function generateStealthAddress(recipientMetaAddress: { spendingPubKey: Hex, viewingPubKey: Hex }) {
   console.log("\n==================================================================================");
   console.log("                           SENDER SIDE (Generating Address)                        ");
   console.log("==================================================================================");
+  await sleep(800);
   console.log("1. Sender needs Recipient's Meta-Address:");
-  console.log(`   [Public] Spending Key: ${recipientMetaAddress.spendingPubKey}`);
-  console.log(`   [Public] Viewing Key:  ${recipientMetaAddress.viewingPubKey}`);
+  // Construct the full meta-address string
+  const metaAddressString = `st:eth:${recipientMetaAddress.spendingPubKey}:${recipientMetaAddress.viewingPubKey}`;
+  console.log(`   [String] Full Meta-Address: ${metaAddressString}`);
+  console.log(`   [Public] Spending Key:      ${recipientMetaAddress.spendingPubKey}`);
+  console.log(`   [Public] Viewing Key:       ${recipientMetaAddress.viewingPubKey}`);
+  await sleep(1500);
 
   // 1. Generate Ephemeral Key Pair
   const ephemeralPrivKey = generatePrivateKey();
@@ -38,6 +45,7 @@ function generateStealthAddress(recipientMetaAddress: { spendingPubKey: Hex, vie
   console.log("\n2. Sender generates a temporary 'Ephemeral Key Pair':");
   console.log(`   [Private] Ephemeral Key: ${ephemeralPrivKey} (Kept Secret, thrown away after)`);
   console.log(`   [Public]  Ephemeral Key: ${ephemeralPubKey} (Broadcasted to network)`);
+  await sleep(1500);
 
   // 2. Compute Shared Secret
   // S = ephemeralPrivKey * recipientViewingPubKey
@@ -45,6 +53,7 @@ function generateStealthAddress(recipientMetaAddress: { spendingPubKey: Hex, vie
   console.log("\n3. Sender computes 'Shared Secret' (ECDH):");
   console.log("   Formula: Ephemeral_PrivKey * Recipient_Viewing_PubKey");
   console.log(`   Result (S): ${sharedSecret}`);
+  await sleep(1500);
 
   // 3. Compute View Tag
   const hashedSharedSecret = keccak256(hexToBytes(sharedSecret));
@@ -53,6 +62,7 @@ function generateStealthAddress(recipientMetaAddress: { spendingPubKey: Hex, vie
   console.log("   Formula: First byte of keccak256(S)");
   console.log(`   Hashed Secret (s): ${hashedSharedSecret}`);
   console.log(`   View Tag: ${viewTag} (Broadcasted)`);
+  await sleep(1500);
 
   // 4. Derive Stealth Public Key
   // P_stealth = P_spending + s * G
@@ -72,6 +82,7 @@ function generateStealthAddress(recipientMetaAddress: { spendingPubKey: Hex, vie
   console.log("\n5. Sender derives 'Stealth Public Key':");
   console.log("   Formula: Recipient_Spending_PubKey + (Hashed_Secret * G)");
   console.log(`   Stealth PubKey: 0x${stealthPubKey}`);
+  await sleep(1500);
 
   // 5. Convert to Ethereum Address
   const uncompressedPubKey = p_stealth_point.toHex(false);
@@ -81,6 +92,7 @@ function generateStealthAddress(recipientMetaAddress: { spendingPubKey: Hex, vie
   
   console.log("\n6. Sender converts Stealth PubKey to Ethereum Address:");
   console.log(`   Stealth Address: ${stealthAddress} (Where funds are sent)`);
+  await sleep(2000);
 
   return {
     stealthAddress,
@@ -89,17 +101,19 @@ function generateStealthAddress(recipientMetaAddress: { spendingPubKey: Hex, vie
   };
 }
 
-function scanAndRecover(
+async function scanAndRecover(
   announcement: { ephemeralPubKey: Hex, viewTag: number, stealthAddress: Hex },
   recipientKeys: { spendingPrivKey: Hex, viewingPrivKey: Hex, spendingPubKey: Hex, viewingPubKey: Hex }
 ) {
   console.log("\n\n==================================================================================");
   console.log("                           RECIPIENT SIDE (Scanning & Recovering)                  ");
   console.log("==================================================================================");
+  await sleep(800);
   console.log("Recipient sees an Announcement on-chain:");
   console.log(`   [Public] Ephemeral PubKey: ${announcement.ephemeralPubKey}`);
   console.log(`   [Public] View Tag: ${announcement.viewTag}`);
   console.log(`   [Public] Stealth Address: ${announcement.stealthAddress}`);
+  await sleep(1500);
 
   // 1. Check View Tag
   console.log("\n1. Recipient checks 'View Tag' to see if this is for them:");
@@ -117,6 +131,7 @@ function scanAndRecover(
     return;
   }
   console.log("   [✓] View Tag Match! This transaction is for us.");
+  await sleep(1500);
 
   // 2. Derive Stealth Private Key
   console.log("\n2. Recipient derives the 'Stealth Private Key' to spend funds:");
@@ -132,6 +147,7 @@ function scanAndRecover(
   console.log(`   Hashed Secret (scalar):     ${hashedSharedSecret}`);
   console.log(`   ------------------------------------------------------------------`);
   console.log(`   Stealth Private Key:        ${d_stealth} (THE KEY TO THE FUNDS)`);
+  await sleep(1500);
 
   // 3. Verify Address
   const derivedAddress = privateKeyToAddress(d_stealth);
@@ -148,6 +164,7 @@ function scanAndRecover(
 
 async function main() {
   console.log("=== ERC-5564 Stealth Address Detailed Walkthrough ===\n");
+  await sleep(500);
 
   // 1. Setup Recipient Keys
   const spendingPrivKey = generatePrivateKey();
@@ -158,16 +175,20 @@ async function main() {
   const recipientKeys = { spendingPrivKey, viewingPrivKey, spendingPubKey, viewingPubKey };
   
   console.log("0. Recipient generates their 'Stealth Meta-Address' (Keys):");
-  console.log(`   [Private] Spending Key: ${spendingPrivKey} (KEPT SECRET)`);
-  console.log(`   [Private] Viewing Key:  ${viewingPrivKey}  (KEPT SECRET)`);
-  console.log(`   [Public]  Spending Key: ${spendingPubKey} (SHARED)`);
-  console.log(`   [Public]  Viewing Key:  ${viewingPubKey}  (SHARED)`);
+  // Construct the full meta-address string
+  const metaAddressString = `st:eth:${spendingPubKey}:${viewingPubKey}`;
+  console.log(`   [String] Full Meta-Address: ${metaAddressString}`);
+  console.log(`   [Private] Spending Key:     ${spendingPrivKey} (KEPT SECRET)`);
+  console.log(`   [Private] Viewing Key:      ${viewingPrivKey}  (KEPT SECRET)`);
+  console.log(`   [Public]  Spending Key:     ${spendingPubKey} (SHARED)`);
+  console.log(`   [Public]  Viewing Key:      ${viewingPubKey}  (SHARED)`);
+  await sleep(2000);
 
   // 2. Sender Generates Stealth Address
-  const announcementData = generateStealthAddress({ spendingPubKey, viewingPubKey });
+  const announcementData = await generateStealthAddress({ spendingPubKey, viewingPubKey });
 
   // 3. Recipient Scans and Recovers
-  scanAndRecover(
+  await scanAndRecover(
     { 
       ephemeralPubKey: announcementData.ephemeralPubKey, 
       viewTag: announcementData.viewTag, 

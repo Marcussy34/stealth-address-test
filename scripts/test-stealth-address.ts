@@ -1,18 +1,10 @@
-import { 
-  secp256k1, 
-  keccak256, 
-  concat, 
-  toHex, 
-  bytesToHex, 
-  hexToBytes,
-  recoverPublicKey,
-  pad,
-  type Hex
-} from 'viem';
+import * as secp256k1 from '@noble/secp256k1';
+import { keccak256, toHex, bytesToHex, hexToBytes, type Hex } from 'viem';
 import { privateKeyToAddress } from 'viem/accounts';
 
 // --- ERC-5564 Constants ---
 const SCHEME_ID = 1; // SECP256k1
+const CURVE_ORDER = BigInt("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
 
 // --- Helper Functions ---
 
@@ -27,8 +19,7 @@ function generatePrivateKey(): Hex {
  * Derives a public key from a private key (compressed).
  */
 function getPublicKey(privateKey: Hex): Hex {
-  // viem's secp256k1 implementation
-  const pubKey = secp256k1.getPublicKey(hexToBytes(privateKey), true); // true for compressed
+  const pubKey = secp256k1.getPublicKey(hexToBytes(privateKey), true);
   return bytesToHex(pubKey);
 }
 
@@ -38,32 +29,8 @@ function getPublicKey(privateKey: Hex): Hex {
  * (ECDH)
  */
 function computeSharedSecret(privateKey: Hex, publicKey: Hex): Hex {
-  const sharedPoint = secp256k1.getSharedSecret(hexToBytes(privateKey), hexToBytes(publicKey));
-  // The shared secret is usually the x-coordinate of the point, hashed.
-  // But ERC-5564 spec says: S = P_ephemeral * k_spending (or vice versa)
-  // We take the shared point (compressed or uncompressed) and hash it?
-  // Let's follow the standard ECDH pattern:
-  // sharedSecret = keccak256(sharedPoint[1...33]) if compressed?
-  // Actually, standard ECDH usually returns the X coordinate.
-  // Let's check viem's behavior. secp256k1.getSharedSecret returns the full point bytes (usually uncompressed without prefix? or compressed?)
-  // It returns a Uint8Array.
-  
-  // For ERC-5564: S = s * P (scalar multiplication)
-  // sharedSecret = keccak256(S)
-  
-  // Let's just use the raw bytes of the shared point for now and hash it.
-  // Note: different libraries handle this differently. 
-  // We will assume the shared secret is the keccak256 of the compressed shared point.
-  
-  // Re-compressing the point if needed.
-  const sharedPointBytes = sharedPoint.slice(1, 33); // Take X coordinate? 
-  // Actually, let's just hash the whole thing returned by getSharedSecret to be safe for this demo.
-  // Wait, `secp256k1.getSharedSecret` usually returns the X coordinate as a 32-byte array in some libs, 
-  // or the full point in others.
-  // In `noble-curves` (which viem uses), it returns the shared key (hashed? or point?).
-  // Let's assume it returns the raw bytes we need to hash.
-  
-  return keccak256(sharedPoint);
+  const sharedSecret = secp256k1.getSharedSecret(hexToBytes(privateKey), hexToBytes(publicKey), true); // isCompressed = true
+  return bytesToHex(sharedSecret);
 }
 
 /**
@@ -83,42 +50,37 @@ function generateStealthAddress(recipientMetaAddress: { spendingPubKey: Hex, vie
   console.log("Shared Secret (Sender):", sharedSecret);
 
   // 3. Compute View Tag (first byte of shared secret)
-  const viewTag = hexToBytes(sharedSecret)[0];
+  const hashedSharedSecret = keccak256(hexToBytes(sharedSecret));
+  const viewTag = hexToBytes(hashedSharedSecret)[0];
   console.log("View Tag:", viewTag);
 
   // 4. Derive Stealth Public Key
-  // P_stealth = P_spending + G * hash(S)
-  // Actually, usually it's: P_stealth = P_spending + G * hash(S)
-  // Let's verify the exact formula for Scheme 1.
-  // P_stealth = P_spending + (hashed_shared_secret * G)
+  // P_stealth = P_spending + s * G
+  // s = hashedSharedSecret
   
-  const hashedSharedSecret = keccak256(concat([hexToBytes(sharedSecret)])); // Hash it again? Or just use S?
-  // Usually we use the shared secret directly or hash it to get a scalar.
-  // Let's use `keccak256(sharedSecret)` as the scalar.
+  const s_scalar = hexToBytes(hashedSharedSecret);
   
-  // We need to add two public keys: P_spending and (scalar * G)
-  const scalar = hexToBytes(sharedSecret); // Use shared secret as scalar directly? Or hash it? 
-  // EIP-5564 says: 
-  // S = ephemeralPrivKey * recipientViewingPubKey
-  // s = keccak256(S)  <-- This is the scalar
-  // P_stealth = P_spending + s*G
+  // Get Point for P_spending
+  const p_spending_hex = recipientMetaAddress.spendingPubKey.slice(2); // Remove 0x
+  const p_spending_point = secp256k1.Point.fromHex(p_spending_hex);
   
-  // Let's do that.
-  const s_scalar = keccak256(hexToBytes(sharedSecret));
+  // Get Point for s * G
+  const s_G_pubKey = secp256k1.getPublicKey(s_scalar, true);
+  const s_G_hex = bytesToHex(s_G_pubKey).slice(2);
+  const s_G_point = secp256k1.Point.fromHex(s_G_hex);
   
-  const p_stealth_point = secp256k1.ProjectivePoint.fromHex(hexToBytes(recipientMetaAddress.spendingPubKey))
-    .add(secp256k1.ProjectivePoint.fromPrivateKey(hexToBytes(s_scalar)));
-    
+  const p_stealth_point = p_spending_point.add(s_G_point);
+  
   const stealthPubKey = p_stealth_point.toHex(true); // Compressed
   
   // 5. Convert to Ethereum Address
-  // We need to convert the pubkey to an address.
-  // viem doesn't have a direct `pubKeyToAddress` exposed easily for raw hex?
-  // We can use `keccak256` on the uncompressed pubkey (minus prefix).
-  
+  // Address = keccak256(uncompressedPubKey)[12..32]
   const uncompressedPubKey = p_stealth_point.toHex(false);
-  const pubKeyBytes = hexToBytes(uncompressedPubKey as Hex).slice(1); // Remove 0x04 prefix
-  const stealthAddress = `0x${bytesToHex(keccak256(pubKeyBytes)).slice(-40)}` as Hex;
+  
+  const pubKeyBytes = hexToBytes(`0x${uncompressedPubKey}` as Hex).slice(1); // Remove 0x04 prefix
+  // keccak256 returns Hex string (0x...)
+  const addressHash = keccak256(pubKeyBytes);
+  const stealthAddress = `0x${addressHash.slice(-40)}` as Hex;
   
   console.log("Generated Stealth Address:", stealthAddress);
 
@@ -126,7 +88,7 @@ function generateStealthAddress(recipientMetaAddress: { spendingPubKey: Hex, vie
     stealthAddress,
     ephemeralPubKey,
     viewTag,
-    ciphertext: "0x..." // Placeholder for encrypted metadata if needed
+    ciphertext: "0x..." 
   };
 }
 
@@ -139,10 +101,11 @@ function scanAndRecover(
 ) {
   console.log("\n--- Recipient: Scanning & Recovering ---");
 
-  // 1. Check View Tag (Optimization)
+  // 1. Check View Tag
   // S = ephemeralPubKey * viewingPrivKey
   const sharedSecret = computeSharedSecret(recipientKeys.viewingPrivKey, announcement.ephemeralPubKey);
-  const calculatedViewTag = hexToBytes(sharedSecret)[0];
+  const hashedSharedSecret = keccak256(hexToBytes(sharedSecret));
+  const calculatedViewTag = hexToBytes(hashedSharedSecret)[0];
 
   console.log("Calculated View Tag:", calculatedViewTag);
   if (calculatedViewTag !== announcement.viewTag) {
@@ -152,19 +115,11 @@ function scanAndRecover(
   console.log("View Tag Match! Proceeding to recover...");
 
   // 2. Derive Stealth Private Key
-  // d_stealth = d_spending + hash(S)
-  const s_scalar = keccak256(hexToBytes(sharedSecret));
+  // d_stealth = d_spending + s
+  const s_scalar = BigInt(hashedSharedSecret);
+  const d_spending = BigInt(recipientKeys.spendingPrivKey);
   
-  // We need to add scalars (private keys) modulo the curve order.
-  // secp256k1 order is n.
-  // viem/noble-curves handles this in `getPublicKey`? No, we need scalar addition.
-  // We can use BigInt for this since we have the curve order.
-  const CURVE_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141n;
-  
-  const d_spending_big = BigInt(recipientKeys.spendingPrivKey);
-  const s_scalar_big = BigInt(s_scalar);
-  
-  const d_stealth_big = (d_spending_big + s_scalar_big) % CURVE_ORDER;
+  const d_stealth_big = (d_spending + s_scalar) % CURVE_ORDER;
   const d_stealth = `0x${d_stealth_big.toString(16).padStart(64, '0')}` as Hex;
   
   console.log("Derived Stealth Private Key:", d_stealth);
@@ -180,13 +135,10 @@ function scanAndRecover(
   }
 }
 
-
-// --- Main Execution ---
-
 async function main() {
   console.log("=== ERC-5564 Stealth Address Simulation ===\n");
 
-  // 1. Setup Recipient Keys (Meta-Address)
+  // 1. Setup Recipient Keys
   const spendingPrivKey = generatePrivateKey();
   const viewingPrivKey = generatePrivateKey();
   const spendingPubKey = getPublicKey(spendingPrivKey);

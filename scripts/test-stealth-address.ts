@@ -8,135 +8,146 @@ const CURVE_ORDER = BigInt("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBF
 
 // --- Helper Functions ---
 
-/**
- * Generates a random private key.
- */
 function generatePrivateKey(): Hex {
   return bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
 }
 
-/**
- * Derives a public key from a private key (compressed).
- */
 function getPublicKey(privateKey: Hex): Hex {
   const pubKey = secp256k1.getPublicKey(hexToBytes(privateKey), true);
   return bytesToHex(pubKey);
 }
 
-/**
- * Computes the shared secret: S = ephemeralPrivKey * recipientPubKey
- * OR S = recipientPrivKey * ephemeralPubKey
- * (ECDH)
- */
 function computeSharedSecret(privateKey: Hex, publicKey: Hex): Hex {
-  const sharedSecret = secp256k1.getSharedSecret(hexToBytes(privateKey), hexToBytes(publicKey), true); // isCompressed = true
+  const sharedSecret = secp256k1.getSharedSecret(hexToBytes(privateKey), hexToBytes(publicKey), true);
   return bytesToHex(sharedSecret);
 }
 
-/**
- * Steal Address Generation (Sender Side)
- */
+// --- Main Logic ---
+
 function generateStealthAddress(recipientMetaAddress: { spendingPubKey: Hex, viewingPubKey: Hex }) {
-  console.log("\n--- Sender: Generating Stealth Address ---");
+  console.log("\n==================================================================================");
+  console.log("                           SENDER SIDE (Generating Address)                        ");
+  console.log("==================================================================================");
+  console.log("1. Sender needs Recipient's Meta-Address:");
+  console.log(`   [Public] Spending Key: ${recipientMetaAddress.spendingPubKey}`);
+  console.log(`   [Public] Viewing Key:  ${recipientMetaAddress.viewingPubKey}`);
 
   // 1. Generate Ephemeral Key Pair
   const ephemeralPrivKey = generatePrivateKey();
   const ephemeralPubKey = getPublicKey(ephemeralPrivKey);
-  console.log("Sender Ephemeral PubKey:", ephemeralPubKey);
+  console.log("\n2. Sender generates a temporary 'Ephemeral Key Pair':");
+  console.log(`   [Private] Ephemeral Key: ${ephemeralPrivKey} (Kept Secret, thrown away after)`);
+  console.log(`   [Public]  Ephemeral Key: ${ephemeralPubKey} (Broadcasted to network)`);
 
-  // 2. Compute Shared Secret (using Viewing Key)
+  // 2. Compute Shared Secret
   // S = ephemeralPrivKey * recipientViewingPubKey
   const sharedSecret = computeSharedSecret(ephemeralPrivKey, recipientMetaAddress.viewingPubKey);
-  console.log("Shared Secret (Sender):", sharedSecret);
+  console.log("\n3. Sender computes 'Shared Secret' (ECDH):");
+  console.log("   Formula: Ephemeral_PrivKey * Recipient_Viewing_PubKey");
+  console.log(`   Result (S): ${sharedSecret}`);
 
-  // 3. Compute View Tag (first byte of shared secret)
+  // 3. Compute View Tag
   const hashedSharedSecret = keccak256(hexToBytes(sharedSecret));
   const viewTag = hexToBytes(hashedSharedSecret)[0];
-  console.log("View Tag:", viewTag);
+  console.log("\n4. Sender computes 'View Tag' (for filtering):");
+  console.log("   Formula: First byte of keccak256(S)");
+  console.log(`   Hashed Secret (s): ${hashedSharedSecret}`);
+  console.log(`   View Tag: ${viewTag} (Broadcasted)`);
 
   // 4. Derive Stealth Public Key
   // P_stealth = P_spending + s * G
-  // s = hashedSharedSecret
-  
   const s_scalar = hexToBytes(hashedSharedSecret);
   
-  // Get Point for P_spending
-  const p_spending_hex = recipientMetaAddress.spendingPubKey.slice(2); // Remove 0x
+  // Fix: Ensure we pass hex strings (without 0x) to Point.fromHex
+  const p_spending_hex = recipientMetaAddress.spendingPubKey.slice(2);
   const p_spending_point = secp256k1.Point.fromHex(p_spending_hex);
   
-  // Get Point for s * G
   const s_G_pubKey = secp256k1.getPublicKey(s_scalar, true);
-  const s_G_hex = bytesToHex(s_G_pubKey).slice(2);
+  const s_G_hex = bytesToHex(s_G_pubKey).slice(2); // Convert Uint8Array to Hex String and remove 0x
   const s_G_point = secp256k1.Point.fromHex(s_G_hex);
   
   const p_stealth_point = p_spending_point.add(s_G_point);
+  const stealthPubKey = p_stealth_point.toHex(true);
   
-  const stealthPubKey = p_stealth_point.toHex(true); // Compressed
-  
+  console.log("\n5. Sender derives 'Stealth Public Key':");
+  console.log("   Formula: Recipient_Spending_PubKey + (Hashed_Secret * G)");
+  console.log(`   Stealth PubKey: 0x${stealthPubKey}`);
+
   // 5. Convert to Ethereum Address
-  // Address = keccak256(uncompressedPubKey)[12..32]
   const uncompressedPubKey = p_stealth_point.toHex(false);
-  
-  const pubKeyBytes = hexToBytes(`0x${uncompressedPubKey}` as Hex).slice(1); // Remove 0x04 prefix
-  // keccak256 returns Hex string (0x...)
+  const pubKeyBytes = hexToBytes(`0x${uncompressedPubKey}` as Hex).slice(1);
   const addressHash = keccak256(pubKeyBytes);
   const stealthAddress = `0x${addressHash.slice(-40)}` as Hex;
   
-  console.log("Generated Stealth Address:", stealthAddress);
+  console.log("\n6. Sender converts Stealth PubKey to Ethereum Address:");
+  console.log(`   Stealth Address: ${stealthAddress} (Where funds are sent)`);
 
   return {
     stealthAddress,
     ephemeralPubKey,
     viewTag,
-    ciphertext: "0x..." 
   };
 }
 
-/**
- * Stealth Address Recovery (Recipient Side)
- */
 function scanAndRecover(
   announcement: { ephemeralPubKey: Hex, viewTag: number, stealthAddress: Hex },
   recipientKeys: { spendingPrivKey: Hex, viewingPrivKey: Hex, spendingPubKey: Hex, viewingPubKey: Hex }
 ) {
-  console.log("\n--- Recipient: Scanning & Recovering ---");
+  console.log("\n\n==================================================================================");
+  console.log("                           RECIPIENT SIDE (Scanning & Recovering)                  ");
+  console.log("==================================================================================");
+  console.log("Recipient sees an Announcement on-chain:");
+  console.log(`   [Public] Ephemeral PubKey: ${announcement.ephemeralPubKey}`);
+  console.log(`   [Public] View Tag: ${announcement.viewTag}`);
+  console.log(`   [Public] Stealth Address: ${announcement.stealthAddress}`);
 
   // 1. Check View Tag
-  // S = ephemeralPubKey * viewingPrivKey
+  console.log("\n1. Recipient checks 'View Tag' to see if this is for them:");
+  console.log("   Formula: Recipient_Viewing_PrivKey * Ephemeral_PubKey");
+  
   const sharedSecret = computeSharedSecret(recipientKeys.viewingPrivKey, announcement.ephemeralPubKey);
+  console.log(`   Re-computed Shared Secret (S): ${sharedSecret}`);
+  
   const hashedSharedSecret = keccak256(hexToBytes(sharedSecret));
   const calculatedViewTag = hexToBytes(hashedSharedSecret)[0];
+  console.log(`   Calculated View Tag: ${calculatedViewTag}`);
 
-  console.log("Calculated View Tag:", calculatedViewTag);
   if (calculatedViewTag !== announcement.viewTag) {
-    console.log("View Tag Mismatch! Not for us.");
+    console.log("   [X] View Tag Mismatch! Ignoring transaction.");
     return;
   }
-  console.log("View Tag Match! Proceeding to recover...");
+  console.log("   [✓] View Tag Match! This transaction is for us.");
 
   // 2. Derive Stealth Private Key
-  // d_stealth = d_spending + s
+  console.log("\n2. Recipient derives the 'Stealth Private Key' to spend funds:");
+  console.log("   Formula: Recipient_Spending_PrivKey + Hashed_Secret (mod curve order)");
+  
   const s_scalar = BigInt(hashedSharedSecret);
   const d_spending = BigInt(recipientKeys.spendingPrivKey);
   
   const d_stealth_big = (d_spending + s_scalar) % CURVE_ORDER;
   const d_stealth = `0x${d_stealth_big.toString(16).padStart(64, '0')}` as Hex;
   
-  console.log("Derived Stealth Private Key:", d_stealth);
+  console.log(`   Recipient Spending PrivKey: ${recipientKeys.spendingPrivKey}`);
+  console.log(`   Hashed Secret (scalar):     ${hashedSharedSecret}`);
+  console.log(`   ------------------------------------------------------------------`);
+  console.log(`   Stealth Private Key:        ${d_stealth} (THE KEY TO THE FUNDS)`);
 
   // 3. Verify Address
   const derivedAddress = privateKeyToAddress(d_stealth);
-  console.log("Derived Stealth Address:", derivedAddress);
+  console.log("\n3. Verification:");
+  console.log(`   Derived Address from Key:   ${derivedAddress}`);
+  console.log(`   Actual Stealth Address:     ${announcement.stealthAddress}`);
 
   if (derivedAddress.toLowerCase() === announcement.stealthAddress.toLowerCase()) {
-    console.log("SUCCESS: Stealth Address Verified and Private Key Recovered!");
+    console.log("\n   [SUCCESS] The derived key controls the stealth address!");
   } else {
-    console.error("FAILURE: Derived address does not match announcement.");
+    console.error("\n   [FAILURE] Something went wrong.");
   }
 }
 
 async function main() {
-  console.log("=== ERC-5564 Stealth Address Simulation ===\n");
+  console.log("=== ERC-5564 Stealth Address Detailed Walkthrough ===\n");
 
   // 1. Setup Recipient Keys
   const spendingPrivKey = generatePrivateKey();
@@ -146,9 +157,11 @@ async function main() {
 
   const recipientKeys = { spendingPrivKey, viewingPrivKey, spendingPubKey, viewingPubKey };
   
-  console.log("Recipient Meta-Address:");
-  console.log(`  Spending PubKey: ${spendingPubKey}`);
-  console.log(`  Viewing PubKey:  ${viewingPubKey}`);
+  console.log("0. Recipient generates their 'Stealth Meta-Address' (Keys):");
+  console.log(`   [Private] Spending Key: ${spendingPrivKey} (KEPT SECRET)`);
+  console.log(`   [Private] Viewing Key:  ${viewingPrivKey}  (KEPT SECRET)`);
+  console.log(`   [Public]  Spending Key: ${spendingPubKey} (SHARED)`);
+  console.log(`   [Public]  Viewing Key:  ${viewingPubKey}  (SHARED)`);
 
   // 2. Sender Generates Stealth Address
   const announcementData = generateStealthAddress({ spendingPubKey, viewingPubKey });

@@ -113,7 +113,13 @@ async function scanAndRecover(
   console.log(`   [Public] Ephemeral PubKey: ${announcement.ephemeralPubKey}`);
   console.log(`   [Public] View Tag: ${announcement.viewTag}`);
   console.log(`   [Public] Stealth Address: ${announcement.stealthAddress}`);
-  await sleep(1500);
+  
+  console.log("\n   [CLARIFICATION] Does Recipient scan every transaction?");
+  console.log("   YES. The Recipient performs ECDH on EVERY announcement to check the View Tag.");
+  console.log("   - If View Tag doesn't match: STOP (Saves 99.6% of work).");
+  console.log("   - If View Tag matches: Proceed to full address derivation (The expensive part).");
+  
+  await sleep(2500);
 
   // 1. Check View Tag
   console.log("\n1. Recipient checks 'View Tag' to see if this is for them:");

@@ -24,7 +24,31 @@ function computeSharedSecret(privateKey: Hex, publicKey: Hex): Hex {
   return bytesToHex(sharedSecret);
 }
 
+// --- ERC-5564 Simulation (The Announcer) ---
+// Official deployed address: 0x55649E01B5Df198D18D95b5cc5051630cfD45564
+interface Announcement {
+  schemeId: number;
+  stealthAddress: Hex;
+  caller: Hex;
+  ephemeralPubKey: Hex;
+  metadata: Hex; // First byte is viewTag, rest is optional data
+}
+
+const AnnouncementLog: Announcement[] = [];
+
+async function emitAnnouncement(announcement: Announcement) {
+  console.log(`\n[ERC-5564 Announcer] Emitting Announcement event...`);
+  AnnouncementLog.push(announcement);
+  await sleep(500);
+  console.log(`[ERC-5564 Announcer] Announcement emitted!`);
+  console.log(`   schemeId: ${announcement.schemeId}`);
+  console.log(`   stealthAddress: ${announcement.stealthAddress}`);
+  console.log(`   ephemeralPubKey: ${announcement.ephemeralPubKey}`);
+  console.log(`   metadata (viewTag in first byte): ${announcement.metadata}`);
+}
+
 // --- ERC-6538 Simulation (The Registry) ---
+// Official deployed address: 0x6538E6bf4B0eBd30A8Ea093027Ac2422ce5d6538
 const MockRegistry: Record<string, { spendingPubKey: Hex, viewingPubKey: Hex }> = {};
 
 async function registerKeys(identifier: string, spendingPubKey: Hex, viewingPubKey: Hex) {
@@ -55,8 +79,9 @@ async function generateStealthAddress(recipientIdentifier: string) {
   console.log(`1. Sender needs Recipient's Meta-Address (for '${recipientIdentifier}'):`);
   const recipientMetaAddress = await lookupKeys(recipientIdentifier);
   
-  // Construct the full meta-address string
-  const metaAddressString = `st:eth:${recipientMetaAddress.spendingPubKey}:${recipientMetaAddress.viewingPubKey}`;
+  // Construct the full meta-address string (Official format: concatenated keys, no separator)
+  // The keys are stored as raw bytes in registry, but displayed with st:eth:0x prefix
+  const metaAddressString = `st:eth:0x${recipientMetaAddress.spendingPubKey.slice(2)}${recipientMetaAddress.viewingPubKey.slice(2)}`;
   console.log(`   [String] Full Meta-Address: ${metaAddressString}`);
   console.log(`   [Public] Spending Key:      ${recipientMetaAddress.spendingPubKey}`);
   console.log(`   [Public] Viewing Key:       ${recipientMetaAddress.viewingPubKey}`);
@@ -116,25 +141,42 @@ async function generateStealthAddress(recipientIdentifier: string) {
   console.log(`   Stealth Address: ${stealthAddress} (Where funds are sent)`);
   await sleep(2000);
 
-  return {
+  // 7. Emit Announcement via ERC-5564 Announcer
+  // In real world: sender calls announce() on the singleton contract
+  // The metadata field MUST have viewTag as first byte
+  const metadata = `0x${viewTag.toString(16).padStart(2, '0')}` as Hex; // Minimal metadata, just viewTag
+  
+  const announcement: Announcement = {
+    schemeId: SCHEME_ID,
     stealthAddress,
+    caller: '0x0000000000000000000000000000000000000001' as Hex, // Mock sender
     ephemeralPubKey,
-    viewTag,
+    metadata,
   };
+  
+  await emitAnnouncement(announcement);
+
+  return announcement;
 }
 
 async function scanAndRecover(
-  announcement: { ephemeralPubKey: Hex, viewTag: number, stealthAddress: Hex },
+  announcement: Announcement,
   recipientKeys: { spendingPrivKey: Hex, viewingPrivKey: Hex, spendingPubKey: Hex, viewingPubKey: Hex }
 ) {
   console.log("\n\n==================================================================================");
   console.log("                           RECIPIENT SIDE (Scanning & Recovering)                  ");
   console.log("==================================================================================");
   await sleep(800);
-  console.log("Recipient sees an Announcement on-chain:");
+  
+  // Extract viewTag from metadata (first byte per ERC-5564 spec)
+  const viewTagFromMetadata = parseInt(announcement.metadata.slice(2, 4), 16);
+  
+  console.log("Recipient sees an Announcement event on-chain from ERC5564Announcer:");
+  console.log(`   [Public] schemeId:        ${announcement.schemeId}`);
   console.log(`   [Public] Ephemeral PubKey: ${announcement.ephemeralPubKey}`);
-  console.log(`   [Public] View Tag: ${announcement.viewTag}`);
   console.log(`   [Public] Stealth Address: ${announcement.stealthAddress}`);
+  console.log(`   [Public] Metadata:        ${announcement.metadata}`);
+  console.log(`   [Parsed] View Tag (byte 0): ${viewTagFromMetadata}`);
   
   console.log("\n   [CLARIFICATION] Does Recipient scan every transaction?");
   console.log("   YES. The Recipient performs ECDH on EVERY announcement to check the View Tag.");
@@ -154,7 +196,7 @@ async function scanAndRecover(
   const calculatedViewTag = hexToBytes(hashedSharedSecret)[0];
   console.log(`   Calculated View Tag: ${calculatedViewTag}`);
 
-  if (calculatedViewTag !== announcement.viewTag) {
+  if (calculatedViewTag !== viewTagFromMetadata) {
     console.log("   [X] View Tag Mismatch! Ignoring transaction.");
     return;
   }
@@ -203,8 +245,8 @@ async function main() {
   const recipientKeys = { spendingPrivKey, viewingPrivKey, spendingPubKey, viewingPubKey };
   
   console.log("0. Recipient generates their 'Stealth Meta-Address' (Keys):");
-  // Construct the full meta-address string
-  const metaAddressString = `st:eth:${spendingPubKey}:${viewingPubKey}`;
+  // Construct the full meta-address string (Official format: concatenated keys)
+  const metaAddressString = `st:eth:0x${spendingPubKey.slice(2)}${viewingPubKey.slice(2)}`;
   console.log(`   [String] Full Meta-Address: ${metaAddressString}`);
   console.log(`   [Private] Spending Key:     ${spendingPrivKey} (KEPT SECRET)`);
   console.log(`   [Private] Viewing Key:      ${viewingPrivKey}  (KEPT SECRET)`);
@@ -231,14 +273,9 @@ async function main() {
   const announcementData = await generateStealthAddress(rawAddress);
 
   // 3. Recipient Scans and Recovers
-  await scanAndRecover(
-    { 
-      ephemeralPubKey: announcementData.ephemeralPubKey, 
-      viewTag: announcementData.viewTag, 
-      stealthAddress: announcementData.stealthAddress 
-    },
-    recipientKeys
-  );
+  // In real world: recipient listens to Announcement events from ERC5564Announcer
+  await scanAndRecover(announcementData, recipientKeys);
 }
 
 main().catch(console.error);
+
